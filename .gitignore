@@ -1,0 +1,28 @@
+# Node & Vue Frontend
+node_modules/
+dist/
+.env
+
+# Go Backend
+backend/server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Docker & Database
+postgres_data/
+
+# JetBrains / GoLand
+.idea/
+*.iml
+
+# Xcode & Swift
+build/
+DerivedData/
+*.xcworkspace
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
