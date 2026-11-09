@@ -52,7 +52,7 @@ onUnmounted(() => {
 
     <!-- Landingspagina: Sessie kiezen of aanmaken -->
     <div v-if="!activePin" style="background: #1e293b; padding: 40px; border-radius: 16px;">
-      <p style="font-size: 1.1rem; color: #94a3b8;">Voer een 4-cijferige sessie-PIN in of start een nieuwe kamer:</p>
+      <p style="font-size: 1.1rem; color: #94a3b8;">Voer een 4-cijferige sessie PIN in of start een nieuwe kamer:</p>
       <div style="display: flex; gap: 12px; justify-content: center; margin-top: 20px;">
         <input
           v-model="pinInput"
