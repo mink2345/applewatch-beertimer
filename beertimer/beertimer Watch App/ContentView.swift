@@ -25,6 +25,14 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .tint(.green)
+                    NavigationLink(destination: HistoryScreen(viewModel: viewModel)) {
+                        VStack {
+                            Text("Mijn Historie").font(.headline)
+                            Text("Lokaal op dit horloge").font(.caption2).foregroundColor(.gray)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .tint(.orange)
                 }
                 .padding(.horizontal)
             }
@@ -48,23 +56,15 @@ struct GroupSetupScreen: View {
                     // Standaard tekstveld (watchOS pakt automatisch Scribble/iPhone keyboard)
                     TextField("PIN", text: $viewModel.sessionPin)
                     .multilineTextAlignment(.center)
+                    .textContentType(.oneTimeCode)
 
                     Button("Join") {
-                        // 1. Maak het oude scorebord direct leeg
                         viewModel.leaderboard.removeAll()
-
-                        // 2. Bepaal of het de testgroep is of een echte groep
-                        if viewModel.sessionPin == "8888" {
-                            viewModel.laadTestData{ _ in }
-                            navigateToTimer = true
-                        } else {
-                            viewModel.connectWebSocket()
-                            navigateToTimer = true
-                        }
+                        viewModel.connectWebSocket()
+                        navigateToTimer = true
                     }
-                            .tint(.green)
-                    // Join knop is grijs/uitgeschakeld tenzij er exact 4 tekens staan
-                            .disabled(viewModel.sessionPin.count != 4)
+                    .tint(.green)
+                    .disabled(viewModel.sessionPin.count != 4)
                 }
 
                 Button(isCreatingGroup ? "Laden..." : "Maak Nieuwe Groep") {
@@ -99,6 +99,7 @@ struct GroupSetupScreen: View {
 struct TimerScreen: View {
     @ObservedObject var viewModel: DrinkTimerViewModel
     let isMultiplayer: Bool
+    @Environment(\.presentationMode) var presentationMode
 
     var body: some View {
         VStack(spacing: 8) {
@@ -107,18 +108,31 @@ struct TimerScreen: View {
             if isMultiplayer {
                 VStack(spacing: 2) {
                     Text("Sessie PIN: \(viewModel.sessionPin)")
-                            .font(.headline)
-                            .foregroundColor(.orange)
-
-                    NavigationLink(destination: LeaderboardScreen(viewModel: viewModel)) {
-                        HStack {
-                            Image(systemName: "list.number")
-                            Text("Bekijk Scores")
+                        .font(.headline)
+                        .foregroundColor(.orange)
+                    
+                    HStack(spacing: 15) {
+                        NavigationLink(destination: LeaderboardScreen(viewModel: viewModel)) {
+                            HStack {
+                                Image(systemName: "list.number")
+                                Text("Scores")
+                            }
+                            .font(.caption2)
                         }
-                        .font(.caption2)
+                        .frame(height: 30)
+                        .tint(.gray)
+                        
+                        // DE NIEUWE PARTY MODE KNOP
+                        Button(action: {
+                            viewModel.playerName = "" // Maak naam leeg
+                            presentationMode.wrappedValue.dismiss() // Ga één scherm terug
+                        }) {
+                            Text("Wissel Speler")
+                                .font(.caption2)
+                        }
+                        .frame(height: 30)
+                        .tint(.blue)
                     }
-                            .frame(height: 30)
-                            .tint(.gray)
                 }
             } else {
                 Spacer().frame(height: 30)
@@ -173,6 +187,36 @@ struct LeaderboardScreen: View {
             }
         }
         .navigationTitle("Leaderboard")
+    }
+}
+struct HistoryScreen: View {
+    @ObservedObject var viewModel: DrinkTimerViewModel
+    
+    var body: some View {
+        List {
+            if viewModel.localHistory.isEmpty {
+                Text("Nog geen tijden geklokt...")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            } else {
+                ForEach(viewModel.localHistory) { score in
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text(score.playerName).font(.headline)
+                            Spacer()
+                            Text(String(format: "%.2fs", Double(score.durationMs) / 1000.0))
+                                .font(.headline)
+                                .foregroundColor(.green)
+                        }
+                        Text(score.date.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .navigationTitle("Mijn Historie")
     }
 }
 

@@ -8,7 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,11 +20,11 @@ type ScoreEntry struct {
 	SessionPin string `json:"pin"`
 	PlayerName string `json:"player_name"`
 	DurationMs int    `json:"duration_ms"`
+	Attempts   int    `json:"attempts"`
 }
 
 type SessionRoom struct {
 	Pin     string
-	Scores  []ScoreEntry
 	Clients map[*websocket.Conn]bool
 }
 
@@ -45,6 +45,53 @@ func NewHub(db *sql.DB) *Hub {
 	}
 }
 
+// Haalt de top 25 van een kamer op uit PostgreSQL (alleen snelste tijd per naam + aantal pogingen)
+func (h *Hub) getLeaderboard(pin string) []ScoreEntry {
+	scores := []ScoreEntry{}
+	if h.db == nil {
+		return scores
+	}
+
+	rows, err := h.db.Query(`
+		SELECT player_name, MIN(duration_ms) as best_time, COUNT(*) as attempts
+		FROM drink_logs
+		WHERE session_pin = $1
+		GROUP BY player_name
+		ORDER BY best_time ASC
+		LIMIT 25
+	`, pin)
+	if err != nil {
+		log.Printf("DB query fout voor pin %s: %v", pin, err)
+		return scores
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var s ScoreEntry
+		s.SessionPin = pin
+		if err := rows.Scan(&s.PlayerName, &s.DurationMs, &s.Attempts); err == nil {
+			scores = append(scores, s)
+		}
+	}
+	return scores
+}
+
+// Achtergrond-worker die elke 24 uur logs ouder dan 30 dagen verwijdert
+func (h *Hub) startCleanupWorker() {
+	ticker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range ticker.C {
+			if h.db != nil {
+				res, err := h.db.Exec("DELETE FROM drink_logs WHERE created_at < NOW() - INTERVAL '30 days'")
+				if err == nil {
+					affected, _ := res.RowsAffected()
+					log.Printf("Cleanup voltooid: %d oude scores verwijderd", affected)
+				}
+			}
+		}
+	}()
+}
+
 // POST /api/session - Genereert een nieuwe 4-cijferige sessie-PIN
 func (h *Hub) createSessionHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -58,14 +105,13 @@ func (h *Hub) createSessionHandler(w http.ResponseWriter, r *http.Request) {
 	var pin string
 	for {
 		pin = fmt.Sprintf("%04d", rand.Intn(10000))
-		if _, exists := h.Sessions[pin]; !exists {
+		if _, exists := h.Sessions[pin]; !exists && pin != "8888" {
 			break
 		}
 	}
 
 	h.Sessions[pin] = &SessionRoom{
 		Pin:     pin,
-		Scores:  []ScoreEntry{},
 		Clients: make(map[*websocket.Conn]bool),
 	}
 
@@ -86,57 +132,58 @@ func (h *Hub) submitScoreHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	entry.PlayerName = strings.TrimSpace(entry.PlayerName)
+	if entry.PlayerName == "" || len(entry.SessionPin) != 4 {
+		http.Error(w, "Naam en 4-cijferige PIN zijn verplicht", http.StatusBadRequest)
+		return
+	}
+
+	// Anti-cheat: weiger fysiek onmogelijke tijden onder de 0.8 seconden
+	if entry.DurationMs < 800 {
+		http.Error(w, "Tijd ongeldig (onder 0.8s)", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Sla direct op in PostgreSQL
+	if h.db != nil {
+		_, err := h.db.Exec(
+			"INSERT INTO drink_logs (session_pin, player_name, duration_ms) VALUES ($1, $2, $3)",
+			entry.SessionPin, entry.PlayerName, entry.DurationMs,
+		)
+		if err != nil {
+			log.Printf("Database insert error: %v", err)
+			http.Error(w, "Database fout", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 2. Haal de bijgewerkte lijst op en push naar alle verbonden WebSockets
+	updatedLeaderboard := h.getLeaderboard(entry.SessionPin)
+
 	h.mu.Lock()
 	room, exists := h.Sessions[entry.SessionPin]
 	if !exists {
-		// Maak de kamer on-the-fly aan als deze nog niet bestond
 		room = &SessionRoom{
 			Pin:     entry.SessionPin,
-			Scores:  []ScoreEntry{},
 			Clients: make(map[*websocket.Conn]bool),
 		}
 		h.Sessions[entry.SessionPin] = room
 	}
 
-	room.Scores = append(room.Scores, entry)
-
-	// Sorteer op snelste tijd (laagste aantal milliseconden bovenaan)
-	sort.Slice(room.Scores, func(i, j int) bool {
-		return room.Scores[i].DurationMs < room.Scores[j].DurationMs
-	})
-
-	scoresSnapshot := make([]ScoreEntry, len(room.Scores))
-	copy(scoresSnapshot, room.Scores)
-
-	// Push direct naar alle openstaande WebSocket-schermen in deze sessie
 	for client := range room.Clients {
-		err := client.WriteJSON(scoresSnapshot)
-		if err != nil {
+		if err := client.WriteJSON(updatedLeaderboard); err != nil {
 			client.Close()
 			delete(room.Clients, client)
 		}
 	}
 	h.mu.Unlock()
 
-	// Schrijf asynchroon weg naar PostgreSQL zodat de API-call nul vertraging oploopt
-	go func(e ScoreEntry) {
-		if h.db != nil {
-			_, err := h.db.Exec(
-				"INSERT INTO drink_logs (session_pin, player_name, duration_ms) VALUES ($1, $2, $3)",
-				e.SessionPin, e.PlayerName, e.DurationMs,
-			)
-			if err != nil {
-				log.Printf("Database insert error: %v", err)
-			}
-		}
-	}(entry)
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(updatedLeaderboard)
 }
 
-// GET /ws?pin=1234 - WebSocket verbinding voor het Vue 3 Dashboard
+// GET /ws?pin=1234 - WebSocket verbinding voor live updates op de Watch
 func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	pin := r.URL.Query().Get("pin")
 	if len(pin) != 4 {
@@ -155,19 +202,17 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		room = &SessionRoom{
 			Pin:     pin,
-			Scores:  []ScoreEntry{},
 			Clients: make(map[*websocket.Conn]bool),
 		}
 		h.Sessions[pin] = room
 	}
 	room.Clients[conn] = true
-	initialScores := room.Scores
 	h.mu.Unlock()
 
-	// Stuur direct de huidige stand bij het verbinden
+	// Stuur direct de huidige stand uit PostgreSQL bij het verbinden
+	initialScores := h.getLeaderboard(pin)
 	conn.WriteJSON(initialScores)
 
-	// Houd verbinding open en ruim op bij sluiten
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			h.mu.Lock()
@@ -189,6 +234,7 @@ func main() {
 	}
 
 	hub := NewHub(db)
+	hub.startCleanupWorker()
 
 	http.HandleFunc("/api/session", hub.createSessionHandler)
 	http.HandleFunc("/api/score", hub.submitScoreHandler)

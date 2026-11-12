@@ -14,6 +14,13 @@ struct ScoreEntry: Codable, Hashable {
     let duration_ms: Int
 }
 
+struct LocalScore: Codable, Identifiable, Hashable {
+    var id = UUID()
+    let playerName: String
+    let durationMs: Int
+    let date: Date
+}
+
 class DrinkTimerViewModel: ObservableObject {
     @Published var state: DrinkState = .idle
     @Published var sessionPin: String = ""
@@ -21,6 +28,8 @@ class DrinkTimerViewModel: ObservableObject {
     @Published var elapsedSeconds: Double = 0.0
     @Published var syncStatus: String = ""
     @Published var leaderboard: [ScoreEntry] = []
+    @Published var localHistory: [LocalScore] = []
+    private let historyKey = "myDrinkHistory"
 
     var isMultiplayer: Bool = false
 
@@ -30,10 +39,11 @@ class DrinkTimerViewModel: ObservableObject {
     private var webSocketTask: URLSessionWebSocketTask?
 
     // Pas dit IP adres aan naar de Mac waarop Docker draait
-    private let serverIP = "192.168.68.122"
+    private let serverIP = "localhost"
 
     init() {
         setupMotionCallbacks()
+        loadLocalHistory()
     }
 
     // MARK: - Netwerk & Sessie Logica
@@ -123,8 +133,14 @@ class DrinkTimerViewModel: ObservableObject {
         elapsedSeconds = Date().timeIntervalSince(start)
         state = .finished
 
+        let durationInMs = Int(elapsedSeconds * 1000)
+
+        // 1. Sla altijd lokaal op het horloge op!
+        saveLocalScore(durationMs: durationInMs)
+
+        // 2. Stuur alléén naar de cloud als we in Multiplayer zitten
         if isMultiplayer {
-            sendScoreToBackend(durationMs: Int(elapsedSeconds * 1000))
+            sendScoreToBackend(durationMs: durationInMs)
         }
     }
 
@@ -156,16 +172,28 @@ class DrinkTimerViewModel: ObservableObject {
             }
         }.resume()
     }
-    func laadTestData(completion: @escaping (Bool) -> Void) {
-        self.sessionPin = "8888"
-        self.leaderboard = [
-            ScoreEntry(pin: "8888", player_name: "Thomas", duration_ms: 3120),
-            ScoreEntry(pin: "8888", player_name: "Mink", duration_ms: 3850),
-            ScoreEntry(pin: "8888", player_name: "Shanna", duration_ms: 4100),
-            ScoreEntry(pin: "8888", player_name: "Pascal", duration_ms: 4500),
-            ScoreEntry(pin: "8888", player_name: "Stijn", duration_ms: 5200)
-        ]
-        completion(true)
+    func loadLocalHistory() {
+        if let data = UserDefaults.standard.data(forKey: historyKey),
+           let saved = try? JSONDecoder().decode([LocalScore].self, from: data) {
+            self.localHistory = saved
+        }
+    }
+
+    func saveLocalScore(durationMs: Int) {
+        let newScore = LocalScore(
+            playerName: self.playerName.isEmpty ? "Gast" : self.playerName,
+            durationMs: durationMs,
+            date: Date()
+        )
+        // Voeg bovenaan toe zodat de nieuwste bovenaan staat
+        localHistory.insert(newScore, at: 0)
+        
+        // Optioneel: bewaar maximaal de laatste 100 tijden om ruimte te besparen
+        if localHistory.count > 100 { localHistory = Array(localHistory.prefix(100)) }
+        
+        if let encoded = try? JSONEncoder().encode(localHistory) {
+            UserDefaults.standard.set(encoded, forKey: historyKey)
+        }
     }
 
 }
