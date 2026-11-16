@@ -35,6 +35,7 @@ class DrinkTimerViewModel: ObservableObject {
 
     private let motionManager = MotionManager()
     private var timer: Timer?
+    private var debugTimer: Timer? // Toegevoegd voor de video log
     private var startTime: Date?
     private var webSocketTask: URLSessionWebSocketTask?
 
@@ -100,7 +101,8 @@ class DrinkTimerViewModel: ObservableObject {
         motionManager.onDrinkThresholdReached = { [weak self] in self?.startDrinkingTimer() }
         motionManager.onArmLowered = { [weak self] in
             guard let self = self, let start = self.startTime else { return }
-            if Date().timeIntervalSince(start) >= 0.4 { self.finishDrinking() }
+            // Tijd teruggezet van 0.4 naar 0.1, omdat we nu veel zuiverder meten wanneer hij staat
+            if Date().timeIntervalSince(start) >= 0.1 { self.finishDrinking() }
         }
     }
 
@@ -111,12 +113,41 @@ class DrinkTimerViewModel: ObservableObject {
         state = .waiting
 
         motionManager.startMonitoring { [weak self] in return self?.state == .drinking }
+        
+        // Wacht een halve seconde zodat je hand stil is, zet dan het nulpunt en start de log
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.motionManager.setBaseline()
+            self?.startDebugLogger()
+        }
     }
+
+    // EXTRA FUNCTIE: De Logger voor in je terminal
+        func startDebugLogger() {
+            print("\n--- NULMETING GEDAAN, LOG START ---")
+            let logStart = Date()
+            
+            debugTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                guard let self = self, self.state == .waiting || self.state == .drinking else { return }
+                let msSindsStart = Int(Date().timeIntervalSince(logStart) * 1000)
+                
+                // Haal zowel hoek als G-kracht op
+                let pitch = self.motionManager.currentPitch
+                let gForce = self.motionManager.currentGForce
+                
+                print(String(format: "⏱ [%5d ms] | State: %@ | Pitch: %5.2f° | G-Kracht: %4.2f G",
+                             msSindsStart,
+                             self.state == .waiting ? "WAIT " : "DRINK",
+                             pitch,
+                             gForce))
+            }
+        }
 
     func startDrinkingTimer() {
         guard state == .waiting else { return }
         state = .drinking
         startTime = Date()
+        
+        print("🚀 LIFT-OFF DETECTEERD! Timer loopt...")
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self = self, let start = self.startTime else { return }
@@ -126,8 +157,11 @@ class DrinkTimerViewModel: ObservableObject {
 
     func finishDrinking() {
         guard state == .drinking, let start = startTime else { return }
+        
         timer?.invalidate()
         timer = nil
+        debugTimer?.invalidate() // Stop de log
+        debugTimer = nil
         motionManager.stopMonitoring()
 
         elapsedSeconds = Date().timeIntervalSince(start)
@@ -142,10 +176,12 @@ class DrinkTimerViewModel: ObservableObject {
         if isMultiplayer {
             sendScoreToBackend(durationMs: durationInMs)
         }
+        print("⏹ KLAP OP TAFEL - Eindtijd: \(durationInMs) ms")
     }
 
     func reset() {
         timer?.invalidate()
+        debugTimer?.invalidate()
         motionManager.stopMonitoring()
         elapsedSeconds = 0.0
         syncStatus = ""
@@ -172,6 +208,7 @@ class DrinkTimerViewModel: ObservableObject {
             }
         }.resume()
     }
+    
     func loadLocalHistory() {
         if let data = UserDefaults.standard.data(forKey: historyKey),
            let saved = try? JSONDecoder().decode([LocalScore].self, from: data) {
@@ -195,6 +232,4 @@ class DrinkTimerViewModel: ObservableObject {
             UserDefaults.standard.set(encoded, forKey: historyKey)
         }
     }
-
 }
-
